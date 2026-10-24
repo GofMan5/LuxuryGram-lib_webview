@@ -866,7 +866,7 @@ HRESULT STDMETHODCALLTYPE Handler::Invoke(
 }
 
 void Handler::updateHistoryStates() {
-	if (!_webview) {
+	if (_destroying || !_webview) {
 		return;
 	};
 	auto canGoBack = BOOL(FALSE);
