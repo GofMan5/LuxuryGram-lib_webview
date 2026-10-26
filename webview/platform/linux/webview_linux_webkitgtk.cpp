@@ -70,7 +70,7 @@ constexpr auto kHelperObjectPath
 	= "/org/desktop_app/GtkIntegration/Webview/Helper";
 constexpr auto kDataHost = "127.0.0.1";
 constexpr auto kExternalShellFallbackBackground = "#eeeeee";
-constexpr auto kMaxScriptMessageBytes = 2 * 1024 * 1024;
+constexpr auto kMaxScriptMessageBytes = 64 * 1024 * 1024;
 constexpr auto kExternalMessageType = "tdesktop_external_bot_webapp";
 constexpr auto kExternalShellSource = "shell";
 constexpr auto kMaxPopupAnchorDimension = 32768;
@@ -889,18 +889,21 @@ bool Instance::create(Config config) {
 		return true;
 	}
 
-	_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-	if (_platform == Platform::Wayland && _mode == WindowMode::Embedded) {
-		// GTK takes the scale on creation: bind the new output, get its scale.
-		gdk_display_sync(gtk_widget_get_display(_window));
-		gdk_display_sync(gtk_widget_get_display(_window));
-	}
+	// Before any widget, or GtkApplication startup reloads the icon theme
 	if (!_applicationId.empty()) {
 		// GTK and WebKit take the application id from GtkApplication
 		_application = gtk_application_new(
 			_applicationId.c_str(),
 			G_APPLICATION_NON_UNIQUE);
 		g_application_register(G_APPLICATION(_application), nullptr, nullptr);
+	}
+	_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	if (_platform == Platform::Wayland && _mode == WindowMode::Embedded) {
+		// GTK takes the scale on creation: bind the new output, get its scale.
+		gdk_display_sync(gtk_widget_get_display(_window));
+		gdk_display_sync(gtk_widget_get_display(_window));
+	}
+	if (_application) {
 		gtk_window_set_application(GTK_WINDOW(_window), _application);
 	}
 	if (_mode == WindowMode::External) {
@@ -1326,12 +1329,16 @@ bool Instance::create(Config config) {
 	}
 	init(std::string(R"(
 if (window === window.top) {
-	const messageToken = ')") + _messageToken + R"(';
+	// Bind the sender to this document, not a provisional navigation URL.
+	const messagePrefix = ')") + _messageToken + R"('
+		+ window.location.href + '\n';
 	const handler = window.webkit.messageHandlers.external;
 	const postMessage = handler.postMessage.bind(handler);
 	const external = Object.freeze({
 		invoke: function(s) {
-			postMessage(messageToken + s);
+			if (typeof s === 'string') {
+				postMessage(messagePrefix + s);
+			}
 		}
 	});
 	Object.defineProperty(window, 'external', {
@@ -1350,11 +1357,18 @@ void Instance::scriptMessageReceived(void *message) {
 			|| !received.starts_with(_messageToken)) {
 		return;
 	}
-	const auto text = received.substr(_messageToken.size());
+	const auto separator = received.find('\n', _messageToken.size());
+	if (separator == std::string::npos || separator == _messageToken.size()) {
+		return;
+	}
+	const auto sourceUrl = received.substr(
+		_messageToken.size(),
+		separator - _messageToken.size());
+	const auto text = received.substr(separator + 1);
 	if (handleShellControlMessage(text)) {
 		return;
 	}
-	_helper.emit_message_received(text, webkit_web_view_get_uri(_webview));
+	_helper.emit_message_received(text, sourceUrl);
 }
 
 bool Instance::handleShellControlMessage(const std::string &message) {
